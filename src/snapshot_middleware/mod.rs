@@ -61,6 +61,10 @@ pub use self::{
 /// This will inspect the path and find the appropriate middleware for it,
 /// taking user-written rules into account. Then, it will attempt to convert
 /// the path into an InstanceSnapshot using that middleware.
+///
+/// If a git filter is active in the context and the path is not acknowledged
+/// (i.e., the file hasn't changed since the base git reference), this function
+/// returns `Ok(None)` to skip syncing that file.
 #[profiling::function]
 pub fn snapshot_from_vfs(
     context: &InstanceContext,
@@ -71,6 +75,16 @@ pub fn snapshot_from_vfs(
         Some(meta) => meta,
         None => return Ok(None),
     };
+
+    // Check if this path is acknowledged by the git filter.
+    // If not, skip this path entirely.
+    if !context.is_path_acknowledged(path) {
+        log::trace!(
+            "Skipping path {} (not acknowledged by git filter)",
+            path.display()
+        );
+        return Ok(None);
+    }
 
     if meta.is_dir() {
         let (middleware, dir_name, init_path) = get_dir_middleware(vfs, path)?;
@@ -213,6 +227,10 @@ pub enum Middleware {
 impl Middleware {
     /// Creates a snapshot for the given path from the Middleware with
     /// the provided name.
+    ///
+    /// When a git filter is active in the context, `ignore_unknown_instances`
+    /// will be set to `true` on all generated snapshots to preserve descendants
+    /// in Studio that are not tracked by Rojo.
     fn snapshot(
         &self,
         context: &InstanceContext,
@@ -262,6 +280,14 @@ impl Middleware {
         };
         if let Ok(Some(ref mut snapshot)) = output {
             snapshot.metadata.middleware = Some(*self);
+
+            // When git filter is active, force ignore_unknown_instances to true
+            // so that we don't delete children in Studio that aren't tracked.
+            if context.has_git_filter() {
+                snapshot.metadata.ignore_unknown_instances = true;
+                // Also apply this recursively to all children
+                set_ignore_unknown_instances_recursive(&mut snapshot.children);
+            }
         }
         output
     }
@@ -362,6 +388,16 @@ impl Middleware {
             }
             Ok(None)
         }
+    }
+}
+
+/// Recursively sets `ignore_unknown_instances` to `true` on all children.
+/// This is used when git filter is active to ensure we don't delete
+/// children in Studio that aren't tracked by Rojo.
+fn set_ignore_unknown_instances_recursive(children: &mut [InstanceSnapshot]) {
+    for child in children {
+        child.metadata.ignore_unknown_instances = true;
+        set_ignore_unknown_instances_recursive(&mut child.children);
     }
 }
 
