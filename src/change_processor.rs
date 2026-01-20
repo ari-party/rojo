@@ -9,6 +9,7 @@ use std::{
 };
 
 use crate::{
+    git::SharedGitFilter,
     message_queue::MessageQueue,
     snapshot::{
         apply_patch_set, compute_patch_set, AppliedPatchSet, InstigatingSource, PatchSet, RojoTree,
@@ -46,11 +47,15 @@ pub struct ChangeProcessor {
 impl ChangeProcessor {
     /// Spin up the ChangeProcessor, connecting it to the given tree, VFS, and
     /// outbound message queue.
+    ///
+    /// If `git_filter` is provided, it will be refreshed on every VFS event
+    /// to ensure newly changed files are acknowledged.
     pub fn start(
         tree: Arc<Mutex<RojoTree>>,
         vfs: Arc<Vfs>,
         message_queue: Arc<MessageQueue<AppliedPatchSet>>,
         tree_mutation_receiver: Receiver<PatchSet>,
+        git_filter: Option<SharedGitFilter>,
     ) -> Self {
         let (shutdown_sender, shutdown_receiver) = crossbeam_channel::bounded(1);
         let vfs_receiver = vfs.event_receiver();
@@ -58,6 +63,7 @@ impl ChangeProcessor {
             tree,
             vfs,
             message_queue,
+            git_filter,
         };
 
         let job_thread = jod_thread::Builder::new()
@@ -111,6 +117,10 @@ struct JobThreadContext {
     /// Whenever changes are applied to the DOM, we should push those changes
     /// into this message queue to inform any connected clients.
     message_queue: Arc<MessageQueue<AppliedPatchSet>>,
+
+    /// Optional Git filter for --git-since mode. When set, will be refreshed
+    /// on every VFS event to ensure newly changed files are acknowledged.
+    git_filter: Option<SharedGitFilter>,
 }
 
 impl JobThreadContext {
@@ -160,6 +170,14 @@ impl JobThreadContext {
     fn handle_vfs_event(&self, event: VfsEvent) {
         log::trace!("Vfs event: {:?}", event);
 
+        // If we have a git filter, refresh it to pick up any new changes.
+        // This ensures that files modified during the session will be acknowledged.
+        if let Some(ref git_filter) = self.git_filter {
+            if let Err(err) = git_filter.refresh() {
+                log::warn!("Failed to refresh git filter: {:?}", err);
+            }
+        }
+
         // Update the VFS immediately with the event.
         self.vfs
             .commit_event(&event)
@@ -168,16 +186,54 @@ impl JobThreadContext {
         // For a given VFS event, we might have many changes to different parts
         // of the tree. Calculate and apply all of these changes.
         let applied_patches = match event {
-            VfsEvent::Create(path) | VfsEvent::Write(path) => {
-                self.apply_patches(self.vfs.canonicalize(&path).unwrap())
-            }
-            VfsEvent::Remove(path) => {
-                // MemoFS does not track parent removals yet, so we can canonicalize
-                // the parent path safely and then append the removed path's file name.
-                let parent = path.parent().unwrap();
-                let file_name = path.file_name().unwrap();
-                let parent_normalized = self.vfs.canonicalize(parent).unwrap();
-                self.apply_patches(parent_normalized.join(file_name))
+            VfsEvent::Create(path) | VfsEvent::Remove(path) | VfsEvent::Write(path) => {
+                let mut tree = self.tree.lock().unwrap();
+                let mut applied_patches = Vec::new();
+
+                // Find the nearest ancestor to this path that has
+                // associated instances in the tree. This helps make sure
+                // that we handle additions correctly, especially if we
+                // receive events for descendants of a large tree being
+                // created all at once.
+                let mut current_path = path.as_path();
+                let affected_ids = loop {
+                    let ids = tree.get_ids_at_path(current_path);
+
+                    log::trace!("Path {} affects IDs {:?}", current_path.display(), ids);
+
+                    if !ids.is_empty() {
+                        break ids.to_vec();
+                    }
+
+                    log::trace!("Trying parent path...");
+                    match current_path.parent() {
+                        Some(parent) => current_path = parent,
+                        None => break Vec::new(),
+                    }
+                };
+
+                if affected_ids.is_empty() {
+                    log::debug!(
+                        "No instances found for path {} or any of its ancestors",
+                        path.display()
+                    );
+                } else {
+                    log::debug!(
+                        "Found {} affected instances for path {}",
+                        affected_ids.len(),
+                        path.display()
+                    );
+                }
+
+                for id in affected_ids {
+                    if let Some(patch) = compute_and_apply_changes(&mut tree, &self.vfs, id) {
+                        if !patch.is_empty() {
+                            applied_patches.push(patch);
+                        }
+                    }
+                }
+
+                applied_patches
             }
             _ => {
                 log::warn!("Unhandled VFS event: {:?}", event);

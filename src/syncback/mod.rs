@@ -28,7 +28,7 @@ use crate::{
     Project,
 };
 
-pub use file_names::{extension_for_middleware, name_for_inst, validate_file_name};
+pub use file_names::{extension_for_middleware, name_for_inst, slugify_name, validate_file_name};
 pub use fs_snapshot::FsSnapshot;
 pub use hash::*;
 pub use property_filter::{filter_properties, filter_properties_preallocated};
@@ -307,6 +307,7 @@ pub fn get_best_middleware(snapshot: &SyncbackSnapshot) -> Middleware {
     static JSON_MODEL_CLASSES: OnceLock<HashSet<&str>> = OnceLock::new();
     let json_model_classes = JSON_MODEL_CLASSES.get_or_init(|| {
         [
+            "Actor",
             "Sound",
             "SoundGroup",
             "Sky",
@@ -324,6 +325,11 @@ pub fn get_best_middleware(snapshot: &SyncbackSnapshot) -> Middleware {
             "ChatInputBarConfiguration",
             "BubbleChatConfiguration",
             "ChannelTabsConfiguration",
+            "RemoteEvent",
+            "UnreliableRemoteEvent",
+            "RemoteFunction",
+            "BindableEvent",
+            "BindableFunction",
         ]
         .into()
     });
@@ -339,8 +345,6 @@ pub fn get_best_middleware(snapshot: &SyncbackSnapshot) -> Middleware {
         return override_middleware;
     } else if let Some(old_middleware) = old_middleware {
         return old_middleware;
-    } else if json_model_classes.contains(inst.class.as_str()) {
-        middleware = Middleware::JsonModel;
     } else {
         middleware = match inst.class.as_str() {
             "Folder" | "Configuration" | "Tool" => Middleware::Dir,
@@ -351,6 +355,7 @@ pub fn get_best_middleware(snapshot: &SyncbackSnapshot) -> Middleware {
             "LocalizationTable" => Middleware::Csv,
             // This isn't the ideal way to handle this but it works.
             name if name.ends_with("Value") => Middleware::JsonModel,
+            _ if json_model_classes.contains(inst.class.as_str()) => Middleware::JsonModel,
             _ => Middleware::Rbxm,
         }
     }
@@ -363,6 +368,28 @@ pub fn get_best_middleware(snapshot: &SyncbackSnapshot) -> Middleware {
             Middleware::Csv => Middleware::CsvDir,
             Middleware::JsonModel | Middleware::Text => Middleware::Dir,
             _ => middleware,
+        }
+    }
+
+    // If the name is invalid but the instance has no descendants and isn't a
+    // folder/config/tool, prefer slugified files over creating a directory.
+    // Only promote to directory when there are children (or dir-like classes).
+    if crate::syncback::file_names::validate_file_name(&inst.name).is_err() {
+        middleware = match middleware {
+            Middleware::ServerScript | Middleware::ClientScript | Middleware::ModuleScript
+                if inst.children().is_empty() =>
+            {
+                middleware
+            }
+            Middleware::JsonModel | Middleware::Text if inst.children().is_empty() => middleware,
+            _ => match middleware {
+                Middleware::ServerScript => Middleware::ServerScriptDir,
+                Middleware::ClientScript => Middleware::ClientScriptDir,
+                Middleware::ModuleScript => Middleware::ModuleScriptDir,
+                Middleware::Csv => Middleware::CsvDir,
+                Middleware::JsonModel | Middleware::Text => Middleware::Dir,
+                _ => middleware,
+            },
         }
     }
 
