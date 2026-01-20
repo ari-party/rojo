@@ -52,6 +52,7 @@ pub fn syncback_loop(
     old_tree: &mut RojoTree,
     mut new_tree: WeakDom,
     project: &Project,
+    force_json: bool,
 ) -> anyhow::Result<FsSnapshot> {
     let ignore_patterns = project
         .syncback_rules
@@ -153,6 +154,7 @@ pub fn syncback_loop(
         old_tree,
         new_tree: &new_tree,
         project,
+        force_json,
     };
 
     let mut snapshots = vec![SyncbackSnapshot {
@@ -213,10 +215,14 @@ pub fn syncback_loop(
         let syncback = match middleware.syncback(&snapshot) {
             Ok(syncback) => syncback,
             Err(err) if middleware == Middleware::Dir => {
-                let new_middleware = match env::var(DEBUG_MODEL_FORMAT_VAR) {
-                    Ok(value) if value == "1" => Middleware::Rbxmx,
-                    Ok(value) if value == "2" => Middleware::JsonModel,
-                    _ => Middleware::Rbxm,
+                let new_middleware = if force_json {
+                    Middleware::JsonModel
+                } else {
+                    match env::var(DEBUG_MODEL_FORMAT_VAR) {
+                        Ok(value) if value == "1" => Middleware::Rbxmx,
+                        Ok(value) if value == "2" => Middleware::JsonModel,
+                        _ => Middleware::Rbxm,
+                    }
                 };
                 let file_name = snapshot
                     .path
@@ -361,10 +367,14 @@ pub fn get_best_middleware(snapshot: &SyncbackSnapshot) -> Middleware {
     }
 
     if middleware == Middleware::Rbxm {
-        middleware = match env::var(DEBUG_MODEL_FORMAT_VAR) {
-            Ok(value) if value == "1" => Middleware::Rbxmx,
-            Ok(value) if value == "2" => Middleware::JsonModel,
-            _ => Middleware::Rbxm,
+        if snapshot.data.force_json {
+            middleware = Middleware::JsonModel;
+        } else {
+            middleware = match env::var(DEBUG_MODEL_FORMAT_VAR) {
+                Ok(value) if value == "1" => Middleware::Rbxmx,
+                Ok(value) if value == "2" => Middleware::JsonModel,
+                _ => Middleware::Rbxm,
+            }
         }
     }
 

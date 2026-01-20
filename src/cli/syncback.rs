@@ -54,6 +54,10 @@ pub struct SyncbackCommand {
     /// If provided, the prompt for writing to the file system is skipped.
     #[clap(long, short = 'y')]
     pub non_interactive: bool,
+
+    /// If provided, syncback will use JSON for all model files instead of binary.
+    #[clap(long)]
+    pub dangerous_force_json: bool,
 }
 
 impl SyncbackCommand {
@@ -104,6 +108,7 @@ impl SyncbackCommand {
             &mut dom_old,
             dom_new,
             session_old.root_project(),
+            self.dangerous_force_json,
         )?;
         log::debug!(
             "Syncback finished in {:.02}s!",

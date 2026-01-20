@@ -20,6 +20,7 @@ pub struct SyncbackData<'sync> {
     pub(super) old_tree: &'sync RojoTree,
     pub(super) new_tree: &'sync WeakDom,
     pub(super) project: &'sync Project,
+    pub(super) force_json: bool,
 }
 
 pub struct SyncbackSnapshot<'sync> {
