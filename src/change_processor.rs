@@ -9,6 +9,7 @@ use std::{
 };
 
 use crate::{
+    git::SharedGitFilter,
     message_queue::MessageQueue,
     snapshot::{
         apply_patch_set, compute_patch_set, AppliedPatchSet, InstigatingSource, PatchSet, RojoTree,
@@ -46,11 +47,15 @@ pub struct ChangeProcessor {
 impl ChangeProcessor {
     /// Spin up the ChangeProcessor, connecting it to the given tree, VFS, and
     /// outbound message queue.
+    ///
+    /// If `git_filter` is provided, it will be refreshed on every VFS event
+    /// to ensure newly changed files are acknowledged.
     pub fn start(
         tree: Arc<Mutex<RojoTree>>,
         vfs: Arc<Vfs>,
         message_queue: Arc<MessageQueue<AppliedPatchSet>>,
         tree_mutation_receiver: Receiver<PatchSet>,
+        git_filter: Option<SharedGitFilter>,
     ) -> Self {
         let (shutdown_sender, shutdown_receiver) = crossbeam_channel::bounded(1);
         let vfs_receiver = vfs.event_receiver();
@@ -58,6 +63,7 @@ impl ChangeProcessor {
             tree,
             vfs,
             message_queue,
+            git_filter,
         };
 
         let job_thread = jod_thread::Builder::new()
@@ -111,6 +117,10 @@ struct JobThreadContext {
     /// Whenever changes are applied to the DOM, we should push those changes
     /// into this message queue to inform any connected clients.
     message_queue: Arc<MessageQueue<AppliedPatchSet>>,
+
+    /// Optional Git filter for --git-since mode. When set, will be refreshed
+    /// on every VFS event to ensure newly changed files are acknowledged.
+    git_filter: Option<SharedGitFilter>,
 }
 
 impl JobThreadContext {
@@ -159,6 +169,14 @@ impl JobThreadContext {
 
     fn handle_vfs_event(&self, event: VfsEvent) {
         log::trace!("Vfs event: {:?}", event);
+
+        // If we have a git filter, refresh it to pick up any new changes.
+        // This ensures that files modified during the session will be acknowledged.
+        if let Some(ref git_filter) = self.git_filter {
+            if let Err(err) = git_filter.refresh() {
+                log::warn!("Failed to refresh git filter: {:?}", err);
+            }
+        }
 
         // Update the VFS immediately with the event.
         self.vfs

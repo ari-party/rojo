@@ -13,6 +13,7 @@ use thiserror::Error;
 
 use crate::{
     change_processor::ChangeProcessor,
+    git::SharedGitFilter,
     message_queue::MessageQueue,
     project::{Project, ProjectError},
     session_id::SessionId,
@@ -94,7 +95,14 @@ impl ServeSession {
     /// The project file is expected to be loaded out-of-band since it's
     /// currently loaded from the filesystem directly instead of through the
     /// in-memory filesystem layer.
-    pub fn new<P: AsRef<Path>>(vfs: Vfs, start_path: P) -> Result<Self, ServeSessionError> {
+    ///
+    /// If `git_filter` is provided, only files that have changed since the
+    /// specified Git reference will be synced.
+    pub fn new<P: AsRef<Path>>(
+        vfs: Vfs,
+        start_path: P,
+        git_filter: Option<SharedGitFilter>,
+    ) -> Result<Self, ServeSessionError> {
         let start_path = start_path.as_ref();
         let start_time = Instant::now();
 
@@ -102,12 +110,28 @@ impl ServeSession {
 
         let root_project = Project::load_initial_project(&vfs, start_path)?;
 
+        // If git filter is active, ensure the project file location is acknowledged
+        // This is necessary so the project structure exists even with no git changes
+        if let Some(ref filter) = git_filter {
+            filter.force_acknowledge(start_path);
+            filter.force_acknowledge(&root_project.file_location);
+            filter.force_acknowledge(root_project.folder_location());
+            log::debug!(
+                "Force acknowledged project at {}",
+                root_project.file_location.display()
+            );
+        }
+
         let mut tree = RojoTree::new(InstanceSnapshot::new());
 
         let root_id = tree.get_root_id();
 
-        let instance_context =
-            InstanceContext::with_emit_legacy_scripts(root_project.emit_legacy_scripts);
+        let instance_context = match &git_filter {
+            Some(filter) => {
+                InstanceContext::with_git_filter(root_project.emit_legacy_scripts, Arc::clone(filter))
+            }
+            None => InstanceContext::with_emit_legacy_scripts(root_project.emit_legacy_scripts),
+        };
 
         log::trace!("Generating snapshot of instances from VFS");
         let snapshot = snapshot_from_vfs(&instance_context, &vfs, start_path)?;
@@ -133,6 +157,7 @@ impl ServeSession {
             Arc::clone(&vfs),
             Arc::clone(&message_queue),
             tree_mutation_receiver,
+            git_filter,
         );
 
         Ok(Self {

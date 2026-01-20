@@ -8,6 +8,7 @@ use anyhow::Context;
 use serde::{Deserialize, Serialize};
 
 use crate::{
+    git::SharedGitFilter,
     glob::Glob,
     path_serializer,
     project::ProjectNode,
@@ -152,13 +153,27 @@ impl Default for InstanceMetadata {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct InstanceContext {
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub path_ignore_rules: Arc<Vec<PathIgnoreRule>>,
     pub emit_legacy_scripts: bool,
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub sync_rules: Vec<SyncRule>,
+    /// Optional Git filter for --git-since mode. When set, only files that have
+    /// changed since the specified Git reference will be synced.
+    #[serde(skip)]
+    pub git_filter: Option<SharedGitFilter>,
+}
+
+impl PartialEq for InstanceContext {
+    fn eq(&self, other: &Self) -> bool {
+        // Note: git_filter is intentionally excluded from comparison
+        // since it's runtime state, not configuration
+        self.path_ignore_rules == other.path_ignore_rules
+            && self.emit_legacy_scripts == other.emit_legacy_scripts
+            && self.sync_rules == other.sync_rules
+    }
 }
 
 impl InstanceContext {
@@ -167,6 +182,7 @@ impl InstanceContext {
             path_ignore_rules: Arc::new(Vec::new()),
             emit_legacy_scripts: emit_legacy_scripts_default().unwrap(),
             sync_rules: Vec::new(),
+            git_filter: None,
         }
     }
 
@@ -177,6 +193,36 @@ impl InstanceContext {
                 .unwrap(),
             ..Self::new()
         }
+    }
+
+    /// Creates a new InstanceContext with a Git filter for --git-since mode.
+    pub fn with_git_filter(
+        emit_legacy_scripts: Option<bool>,
+        git_filter: SharedGitFilter,
+    ) -> Self {
+        Self {
+            git_filter: Some(git_filter),
+            ..Self::with_emit_legacy_scripts(emit_legacy_scripts)
+        }
+    }
+
+    /// Sets the Git filter for this context.
+    pub fn set_git_filter(&mut self, git_filter: Option<SharedGitFilter>) {
+        self.git_filter = git_filter;
+    }
+
+    /// Returns true if the given path should be acknowledged (synced).
+    /// If no git filter is set, all paths are acknowledged.
+    pub fn is_path_acknowledged(&self, path: &Path) -> bool {
+        match &self.git_filter {
+            Some(filter) => filter.is_acknowledged(path),
+            None => true,
+        }
+    }
+
+    /// Returns true if a git filter is active.
+    pub fn has_git_filter(&self) -> bool {
+        self.git_filter.is_some()
     }
 
     /// Extend the list of ignore rules in the context with the given new rules.

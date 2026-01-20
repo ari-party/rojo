@@ -192,6 +192,17 @@ pub fn snapshot_project_node(
         }
 
         (_, None, _, Some(PathNode::Required(path))) => {
+            // If git filter is active and the path was filtered out, treat it
+            // as if the path was optional and skip this node.
+            if context.has_git_filter() {
+                log::trace!(
+                    "Skipping project node '{}' because its path was filtered by git filter: {}",
+                    instance_name,
+                    path.display()
+                );
+                return Ok(None);
+            }
+
             anyhow::bail!(
                 "Rojo project referred to a file using $path that could not be turned into a Roblox Instance by Rojo.\n\
                 Check that the file exists and is a file type known by Rojo.\n\
@@ -282,7 +293,12 @@ pub fn snapshot_project_node(
     // If the user didn't specify it AND $path was not specified (meaning
     // there's no existing value we'd be stepping on from a project file or meta
     // file), set it to true.
-    if let Some(ignore) = node.ignore_unknown_instances {
+    //
+    // When git filter is active, always set to true to preserve descendants
+    // in Studio that are not tracked by Rojo.
+    if context.has_git_filter() {
+        metadata.ignore_unknown_instances = true;
+    } else if let Some(ignore) = node.ignore_unknown_instances {
         metadata.ignore_unknown_instances = ignore;
     } else if node.path.is_none() {
         // TODO: Introduce a strict mode where $ignoreUnknownInstances is never

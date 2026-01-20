@@ -9,6 +9,7 @@ mod tree_view;
 
 mod auth_cookie;
 mod change_processor;
+mod git;
 mod glob;
 mod json;
 mod lua_ast;
@@ -28,6 +29,7 @@ mod web;
 
 // TODO: Work out what we should expose publicly
 
+pub use git::{GitFilter, SharedGitFilter};
 pub use project::*;
 pub use rojo_ref::*;
 pub use session_id::SessionId;
